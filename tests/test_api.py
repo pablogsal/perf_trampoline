@@ -1,7 +1,7 @@
-import pytest
 import os
 import pathlib
-import sys
+
+import pytest
 
 from perf_trampoline import is_trampoline_active
 from perf_trampoline import register_handles
@@ -50,6 +50,7 @@ def test_trampoline_is_registered():
     perf_file = pathlib.Path(f"/tmp/perf-{os.getpid()}.map")
     assert f"py::{func.__qualname__}:{__file__}" in perf_file.read_text()
 
+
 def test_trapoline_is_registered_in_forked_child():
     # GIVEN
     def func():
@@ -66,7 +67,7 @@ def test_trapoline_is_registered_in_forked_child():
             os._exit(0)
         else:
             os.waitpid(pid, 0)
-    
+
     # THEN
     perf_file = pathlib.Path(f"/tmp/perf-{pid}.map")
     assert f"py::{func.__qualname__}:{__file__}" in perf_file.read_text()
