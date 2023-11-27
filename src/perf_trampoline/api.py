@@ -1,7 +1,7 @@
+import atexit
 import os
 import signal
 from contextlib import contextmanager
-import atexit
 
 from ._perf_trampoline import _afterfork_child
 from ._perf_trampoline import _finish_trampoline
@@ -16,6 +16,7 @@ def trampoline_context():
         yield
     finally:
         _init_trampoline(False)
+
 
 atexit.register(_finish_trampoline)
 

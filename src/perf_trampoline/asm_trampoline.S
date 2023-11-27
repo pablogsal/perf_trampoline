@@ -1,5 +1,5 @@
     .text
-    .globl	__Py_trampoline_func_start
+    .globl	_Py_trampoline_func_start
 # The following assembly is equivalent to:
 # PyObject *
 # trampoline(PyThreadState *ts, _PyInterpreterFrame *f,
@@ -7,7 +7,7 @@
 # {
 #     return evaluator(ts, f, throwflag);
 # }
-__Py_trampoline_func_start:
+_Py_trampoline_func_start:
 #ifdef __x86_64__
     sub    $8, %rsp
     call    *%rcx
@@ -23,5 +23,5 @@ __Py_trampoline_func_start:
     ldp     x29, x30, [sp], 16
     ret
 #endif
-    .globl	__Py_trampoline_func_end
-__Py_trampoline_func_end:
+    .globl	_Py_trampoline_func_end
+_Py_trampoline_func_end:

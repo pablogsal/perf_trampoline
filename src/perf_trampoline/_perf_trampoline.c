@@ -134,12 +134,14 @@ any DWARF information available for them).
 #include "internal/pycore_frame.h"
 #include "internal/pycore_interp.h"
 
-int _PyPerfTrampoline_Fini(int);
+#include "gdb_support.h"
+int
+_PyPerfTrampoline_Fini(int);
 
 typedef enum {
     PERF_STATUS_FAILED = -1,  // Perf trampoline is in an invalid state
     PERF_STATUS_NO_INIT = 0,  // Perf trampoline is not initialized
-    PERF_STATUS_OK = 1,       // Perf trampoline is ready to be executed
+    PERF_STATUS_OK = 1,  // Perf trampoline is ready to be executed
 } perf_status_t;
 
 #include <fcntl.h>
@@ -153,41 +155,40 @@ typedef enum {
  * are passed in the same order as the function requires. This results in
  * shorter, more efficient ASM code for trampoline.
  */
-typedef PyObject *(*py_evaluator)(PyThreadState *, _PyInterpreterFrame *,
-                                  int throwflag);
-typedef PyObject *(*py_trampoline)(PyThreadState *, _PyInterpreterFrame *, int,
-                                   py_evaluator);
+typedef PyObject* (*py_evaluator)(PyThreadState*, _PyInterpreterFrame*, int throwflag);
+typedef PyObject* (*py_trampoline)(PyThreadState*, _PyInterpreterFrame*, int, py_evaluator);
 
-extern void *_Py_trampoline_func_start;  // Start of the template of the
+extern void* _Py_trampoline_func_start;  // Start of the template of the
                                          // assembly trampoline
-extern void * _Py_trampoline_func_end;  // End of the template of the assembly trampoline
+extern void* _Py_trampoline_func_end;  // End of the template of the assembly trampoline
 
-struct code_arena_st {
-    char *start_addr;    // Start of the memory arena
-    char *current_addr;  // Address of the current trampoline within the arena
-    size_t size;         // Size of the memory arena
-    size_t size_left;    // Remaining size of the memory arena
-    size_t code_size;    // Size of the code of every trampoline in the arena
-    struct code_arena_st
-        *prev;  // Pointer to the arena  or NULL if this is the first arena.
+struct code_arena_st
+{
+    char* start_addr;  // Start of the memory arena
+    char* current_addr;  // Address of the current trampoline within the arena
+    size_t size;  // Size of the memory arena
+    size_t size_left;  // Remaining size of the memory arena
+    size_t code_size;  // Size of the code of every trampoline in the arena
+    struct code_arena_st* prev;  // Pointer to the arena  or NULL if this is the first arena.
 };
 
 typedef struct code_arena_st code_arena_t;
 
-struct trampoline_api_st {
-    void *state;
+struct trampoline_api_st
+{
+    void* state;
 };
 
 typedef struct trampoline_api_st trampoline_api_t;
 
 static perf_status_t perf_status = PERF_STATUS_NO_INIT;
 static Py_ssize_t extra_code_index = -1;
-static code_arena_t *code_arena;
+static code_arena_t* code_arena;
 static trampoline_api_t trampoline_api;
 
-static FILE *perf_map_file;
+static FILE* perf_map_file;
 
-static void *
+static void*
 perf_map_get_file(void)
 {
     if (perf_map_file) {
@@ -198,8 +199,7 @@ perf_map_get_file(void)
     // Location and file name of perf map is hard-coded in perf tool.
     // Use exclusive create flag wit nofollow to prevent symlink attacks.
     int flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC;
-    snprintf(filename, sizeof(filename) - 1, "/tmp/perf-%jd.map",
-             (intmax_t)pid);
+    snprintf(filename, sizeof(filename) - 1, "/tmp/perf-%jd.map", (intmax_t)pid);
     int fd = open(filename, flags, 0600);
     if (fd == -1) {
         perf_status = PERF_STATUS_FAILED;
@@ -217,9 +217,9 @@ perf_map_get_file(void)
 }
 
 static int
-perf_map_close(void *state)
+perf_map_close(void* state)
 {
-    FILE *fp = (FILE *)state;
+    FILE* fp = (FILE*)state;
     int ret = 0;
     if (fp) {
         ret = fclose(fp);
@@ -230,25 +230,23 @@ perf_map_close(void *state)
 }
 
 static void
-perf_map_write_entry(void *state, const void *code_addr,
-                         unsigned int code_size, PyCodeObject *co)
+perf_map_write_entry(void* state, const void* code_addr, unsigned int code_size, PyCodeObject* co)
 {
     assert(state != NULL);
-    FILE *method_file = (FILE *)state;
-    const char *entry = PyUnicode_AsUTF8(co->co_qualname);
+    FILE* method_file = (FILE*)state;
+    const char* entry = PyUnicode_AsUTF8(co->co_qualname);
     if (entry == NULL) {
-        _PyErr_WriteUnraisableMsg("Failed to get qualname from code object",
-                                  NULL);
+        _PyErr_WriteUnraisableMsg("Failed to get qualname from code object", NULL);
         return;
     }
-    const char *filename = PyUnicode_AsUTF8(co->co_filename);
+    const char* filename = PyUnicode_AsUTF8(co->co_filename);
     if (filename == NULL) {
-        _PyErr_WriteUnraisableMsg("Failed to get filename from code object",
-                                  NULL);
+        _PyErr_WriteUnraisableMsg("Failed to get filename from code object", NULL);
         return;
     }
-    fprintf(method_file, "%p %x py::%s:%s\n", code_addr, code_size, entry,
-            filename);
+    fprintf(method_file, "%p %x py::%s:%s\n", code_addr, code_size, entry, filename);
+    int lineno = PyCode_Addr2Line(co, 0);
+    register_raw_debug_symbol(entry, filename, lineno, code_addr, code_size, 0);
     fflush(method_file);
 }
 
@@ -258,20 +256,21 @@ new_code_arena(void)
     // non-trivial programs typically need 64 to 256 kiB.
     size_t mem_size = 4096 * 16;
     assert(mem_size % sysconf(_SC_PAGESIZE) == 0);
-    char *memory =
-        mmap(NULL,  // address
-             mem_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
-             -1,  // fd (not used here)
-             0);  // offset (not used here)
+    char* memory =
+            mmap(NULL,  // address
+                 mem_size,
+                 PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS,
+                 -1,  // fd (not used here)
+                 0);  // offset (not used here)
     if (!memory) {
         PyErr_SetFromErrno(PyExc_OSError);
-        _PyErr_WriteUnraisableMsg(
-            "Failed to create new mmap for perf trampoline", NULL);
+        _PyErr_WriteUnraisableMsg("Failed to create new mmap for perf trampoline", NULL);
         perf_status = PERF_STATUS_FAILED;
         return -1;
     }
-    void *start = &_Py_trampoline_func_start;
-    void *end = &_Py_trampoline_func_end;
+    void* start = &_Py_trampoline_func_start;
+    void* end = &_Py_trampoline_func_end;
     size_t code_size = end - start;
 
     size_t n_copies = mem_size / code_size;
@@ -284,17 +283,16 @@ new_code_arena(void)
         PyErr_SetFromErrno(PyExc_OSError);
         munmap(memory, mem_size);
         _PyErr_WriteUnraisableMsg(
-            "Failed to set mmap for perf trampoline to PROT_READ | PROT_EXEC",
-            NULL);
+                "Failed to set mmap for perf trampoline to PROT_READ | PROT_EXEC",
+                NULL);
         return -1;
     }
 
-    code_arena_t *new_arena = PyMem_RawCalloc(1, sizeof(code_arena_t));
+    code_arena_t* new_arena = PyMem_RawCalloc(1, sizeof(code_arena_t));
     if (new_arena == NULL) {
         PyErr_NoMemory();
         munmap(memory, mem_size);
-        _PyErr_WriteUnraisableMsg("Failed to allocate new code arena struct",
-                                  NULL);
+        _PyErr_WriteUnraisableMsg("Failed to allocate new code arena struct", NULL);
         return -1;
     }
 
@@ -311,8 +309,8 @@ new_code_arena(void)
 static void
 free_code_arenas(void)
 {
-    code_arena_t *cur = code_arena;
-    code_arena_t *prev;
+    code_arena_t* cur = code_arena;
+    code_arena_t* prev;
     code_arena = NULL;  // invalid static pointer
     while (cur) {
         munmap(cur->start_addr, cur->size);
@@ -323,7 +321,7 @@ free_code_arenas(void)
 }
 
 static inline py_trampoline
-code_arena_new_code(code_arena_t *code_arena)
+code_arena_new_code(code_arena_t* code_arena)
 {
     py_trampoline trampoline = (py_trampoline)code_arena->current_addr;
     code_arena->size_left -= code_arena->code_size;
@@ -334,8 +332,7 @@ code_arena_new_code(code_arena_t *code_arena)
 static inline py_trampoline
 compile_trampoline(void)
 {
-    if ((code_arena == NULL) ||
-        (code_arena->size_left <= code_arena->code_size)) {
+    if ((code_arena == NULL) || (code_arena->size_left <= code_arena->code_size)) {
         if (new_code_arena() < 0) {
             return NULL;
         }
@@ -344,18 +341,16 @@ compile_trampoline(void)
     return code_arena_new_code(code_arena);
 }
 
-static PyObject *
-py_trampoline_evaluator(PyThreadState *ts, _PyInterpreterFrame *frame,
-                        int throw)
+static PyObject*
+py_trampoline_evaluator(PyThreadState* ts, _PyInterpreterFrame* frame, int throw)
 {
-    if (perf_status == PERF_STATUS_FAILED ||
-        perf_status == PERF_STATUS_NO_INIT) {
+    if (perf_status == PERF_STATUS_FAILED || perf_status == PERF_STATUS_NO_INIT) {
         goto default_eval;
     }
-    PyCodeObject *co = frame->f_code;
+    PyCodeObject* co = frame->f_code;
     py_trampoline f = NULL;
     assert(extra_code_index != -1);
-    int ret = _PyCode_GetExtra((PyObject *)co, extra_code_index, (void **)&f);
+    int ret = _PyCode_GetExtra((PyObject*)co, extra_code_index, (void**)&f);
     if (ret != 0 || f == NULL) {
         // This is the first time we see this code object so we need
         // to compile a trampoline for it.
@@ -363,10 +358,8 @@ py_trampoline_evaluator(PyThreadState *ts, _PyInterpreterFrame *frame,
         if (new_trampoline == NULL) {
             goto default_eval;
         }
-        perf_map_write_entry(trampoline_api.state, new_trampoline,
-                                   code_arena->code_size, co);
-        _PyCode_SetExtra((PyObject *)co, extra_code_index,
-                         (void *)new_trampoline);
+        perf_map_write_entry(trampoline_api.state, new_trampoline, code_arena->code_size, co);
+        _PyCode_SetExtra((PyObject*)co, extra_code_index, (void*)new_trampoline);
         f = new_trampoline;
     }
     assert(f != NULL);
@@ -379,7 +372,7 @@ default_eval:
 int
 _PyIsPerfTrampolineActive(void)
 {
-    PyThreadState *tstate = _PyThreadState_GET();
+    PyThreadState* tstate = _PyThreadState_GET();
     return tstate->interp->eval_frame == py_trampoline_evaluator;
     return 0;
 }
@@ -387,24 +380,23 @@ _PyIsPerfTrampolineActive(void)
 int
 _PyPerfTrampoline_Init(int activate)
 {
-    PyThreadState *tstate = _PyThreadState_GET();
-    if (tstate->interp->eval_frame &&
-        tstate->interp->eval_frame != py_trampoline_evaluator) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "Trampoline cannot be initialized as a custom eval "
-                        "frame is already present");
+    PyThreadState* tstate = _PyThreadState_GET();
+    if (tstate->interp->eval_frame && tstate->interp->eval_frame != py_trampoline_evaluator) {
+        PyErr_SetString(
+                PyExc_RuntimeError,
+                "Trampoline cannot be initialized as a custom eval "
+                "frame is already present");
         return -1;
     }
     if (!activate) {
         tstate->interp->eval_frame = NULL;
-    }
-    else {
+    } else {
         tstate->interp->eval_frame = py_trampoline_evaluator;
         if (new_code_arena() < 0) {
             return -1;
         }
         if (trampoline_api.state == NULL) {
-            void *state = perf_map_get_file();
+            void* state = perf_map_get_file();
             if (state == NULL) {
                 return -1;
             }
@@ -422,7 +414,7 @@ _PyPerfTrampoline_Init(int activate)
 int
 _PyPerfTrampoline_Fini(int free_arenas)
 {
-    PyThreadState *tstate = _PyThreadState_GET();
+    PyThreadState* tstate = _PyThreadState_GET();
     if (tstate->interp->eval_frame == py_trampoline_evaluator) {
         tstate->interp->eval_frame = NULL;
     }
@@ -449,15 +441,19 @@ _PyPerfTrampoline_AfterFork_Child()
     return 0;
 }
 
-static PyObject* _finish_trampoline_wrapper(PyObject* self) {
- if (_PyPerfTrampoline_Fini(1) != 0) {
+static PyObject*
+_finish_trampoline_wrapper(PyObject* self)
+{
+    if (_PyPerfTrampoline_Fini(false) != 0) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to finalize Perf trampoline.");
         return NULL;
     }
     Py_RETURN_NONE;
 }
 
-static PyObject* _init_trampoline_wrapper(PyObject* self, PyObject* activate) {
+static PyObject*
+_init_trampoline_wrapper(PyObject* self, PyObject* activate)
+{
     int activate_flag = PyObject_IsTrue(activate);
     if (_PyPerfTrampoline_Init(activate_flag) != 0) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to initialize Perf trampoline.");
@@ -466,12 +462,16 @@ static PyObject* _init_trampoline_wrapper(PyObject* self, PyObject* activate) {
     Py_RETURN_NONE;
 }
 
-static PyObject* _is_trampoline_active_wrapper(PyObject* self) {
+static PyObject*
+_is_trampoline_active_wrapper(PyObject* self)
+{
     int is_active = _PyIsPerfTrampolineActive();
     return PyBool_FromLong(is_active);
 }
 
-static PyObject* _afterfork_child_wrapper(PyObject* self) {
+static PyObject*
+_afterfork_child_wrapper(PyObject* self)
+{
     int status = _PyPerfTrampoline_AfterFork_Child();
     if (status) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to restart trampoline in child.");
@@ -481,27 +481,36 @@ static PyObject* _afterfork_child_wrapper(PyObject* self) {
 }
 
 static PyMethodDef PerfTrampolineMethods[] = {
-    {"_afterfork_child", (PyCFunction)_afterfork_child_wrapper, METH_NOARGS,
-     "Restart trampoline in file in child."},
-    {"_finish_trampoline", (PyCFunction)_finish_trampoline_wrapper, METH_NOARGS,
-     "Finalize Perf trampoline."},
-    {"_init_trampoline", (PyCFunction)_init_trampoline_wrapper, METH_O,
-     "Initialize Perf trampoline."},
-    {"_is_trampoline_active", (PyCFunction)_is_trampoline_active_wrapper, METH_NOARGS,
-     "Check if Perf trampoline is active."},
-    {NULL, NULL, 0, NULL} // Sentinel
+        {"_afterfork_child",
+         (PyCFunction)_afterfork_child_wrapper,
+         METH_NOARGS,
+         "Restart trampoline in file in child."},
+        {"_finish_trampoline",
+         (PyCFunction)_finish_trampoline_wrapper,
+         METH_NOARGS,
+         "Finalize Perf trampoline."},
+        {"_init_trampoline",
+         (PyCFunction)_init_trampoline_wrapper,
+         METH_O,
+         "Initialize Perf trampoline."},
+        {"_is_trampoline_active",
+         (PyCFunction)_is_trampoline_active_wrapper,
+         METH_NOARGS,
+         "Check if Perf trampoline is active."},
+        {NULL, NULL, 0, NULL}  // Sentinel
 };
 
 // Module definition
 static struct PyModuleDef perf_module = {
-    PyModuleDef_HEAD_INIT,
-    "_perf_trampoline",   // Module name
-    NULL,                // Module documentation
-    -1,                  // Size of per-interpreter state of the module
-    PerfTrampolineMethods
-};
+        PyModuleDef_HEAD_INIT,
+        "_perf_trampoline",  // Module name
+        NULL,  // Module documentation
+        -1,  // Size of per-interpreter state of the module
+        PerfTrampolineMethods};
 
 // Module initialization function
-PyMODINIT_FUNC PyInit__perf_trampoline(void) {
+PyMODINIT_FUNC
+PyInit__perf_trampoline(void)
+{
     return PyModule_Create(&perf_module);
 }
